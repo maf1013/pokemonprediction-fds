@@ -290,38 +290,53 @@ def team_static_features(p_team, prefix='p1'):
 def create_features_from_battle(b, type_eff):
     '''
     Extracts and combines all relevant features from a Pokémon battle.
-    Calculates player team statistics, opponent lead data, type advantages, attribute differences, 
+    Calculates player team statistics, opponent lead data, type advantages, attribute differences,
     and a summary of the battle (damage, turns, status conditions, control).
     Returns a dictionary with all these variables ready to train the victory prediction model.
     '''
+
     # Dictionary where all features are stored
     f = {}
+
     # List with all Pokémon of player 1
     p1_team = b.get('p1_team_details') or []
+
     # Details of the opponent's lead Pokémon
     p2_lead = b.get('p2_lead_details') or {}
 
     # Add static features of player 1's team
     f.update(team_static_features(p1_team, 'p1'))
 
-    # # Extract the base stats of player 2's lead Pokémon 
-    for s in ['base_hp','base_atk','base_def','base_spa','base_spd','base_spe']:
-        f[f'p2_lead_{s}'] = float(p2_lead.get(s,0.0)) if p2_lead else 0.0
-    #And also it type
+    # Extract the base stats of player 2's lead Pokémon 
+    for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']:
+        f[f'p2_lead_{s}'] = float(p2_lead.get(s, 0.0)) if p2_lead else 0.0
+
+    # Lead type
     p2_types = safe_types(p2_lead.get('types', [])) if p2_lead else ['notype']
 
-    # Calculate how much advantage or disadvantage player 1's team has against the opponent's lead type.
-    p1_types = [t for p in p1_team for t in safe_types(p.get('types', [])) if t!='notype']
+    # Player 1 full type list
+    p1_types = [
+        t for p in p1_team for t in safe_types(p.get('types', []))
+        if t != 'notype'
+    ]
+
+    # -------------------------------------------------------
+    # TYPE EFFECTIVENESS FEATURES
+    # -------------------------------------------------------
     if p1_types and p2_types:
-        #effectiveness of P1 → P2 (how effective P1's attacks are)
+
+        # Effectiveness of P1 → P2
         vals = [type_eff[t1][t2] for t1 in p1_types for t2 in p2_types]
-        #effectiveness of P2 → P1 (how vulnerable P1 is)
-        rvs  = [type_eff[t2][t1] for t1 in p1_types for t2 in p2_types]
+
+        # Effectiveness of P2 → P1
+        rvs = [type_eff[t2][t1] for t1 in p1_types for t2 in p2_types]
+
         f['type_eff_mean'] = float(np.mean(vals))
-        f['type_eff_max']  = float(np.max(vals))
-        f['type_eff_min']  = float(np.min(vals))
+        f['type_eff_max'] = float(np.max(vals))
+        f['type_eff_min'] = float(np.min(vals))
         f['type_advantage'] = f['type_eff_mean'] - 1.0
         f['type_disadvantage'] = float(np.mean(rvs)) - 1.0
+
     else:
         f['type_eff_mean'] = 1.0
         f['type_eff_max'] = 1.0
@@ -329,48 +344,680 @@ def create_features_from_battle(b, type_eff):
         f['type_advantage'] = 0.0
         f['type_disadvantage'] = 0.0
 
-    # Calculate the base stat advantage of player 1 against the opponent's lead Pokémon
-    for s in ['base_hp','base_atk','base_def','base_spa','base_spd','base_spe']:
-        f[f'diff_{s}'] = f.get(f'p1_{s}_mean',0.0) - f.get(f'p2_lead_{s}',0.0)
 
-    f['total_stat_advantage'] = sum(f.get(f'p1_{s}_mean',0.0) for s in ['base_hp','base_atk','base_def','base_spa','base_spd','base_spe']) - \
-                                sum(f.get(f'p2_lead_{s}',0.0) for s in ['base_hp','base_atk','base_def','base_spa','base_spd','base_spe'])
+    for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']:
+        f[f'diff_{s}'] = f.get(f'p1_{s}_mean', 0.0) - f.get(f'p2_lead_{s}', 0.0)
 
-    # Add features from the battle timeline
+    f['total_stat_advantage'] = (
+        sum(f.get(f'p1_{s}_mean', 0.0)
+            for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe'])
+        -
+        sum(f.get(f'p2_lead_{s}', 0.0)
+            for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe'])
+    )
+
+    for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']:
+        f[f'ratio_{s}'] = (
+            f.get(f'p1_{s}_mean', 0.0) + 1e-3
+        ) / (
+            f.get(f'p2_lead_{s}', 0.0) + 1e-3
+        )
+
+    # Ratio of total stats
+    p1_total = sum(
+        f.get(f'p1_{s}_mean', 0.0)
+        for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']
+    )
+    p2_total = sum(
+        f.get(f'p2_lead_{s}', 0.0)
+        for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']
+    )
+    f['ratio_total_stats'] = (p1_total + 1e-3) / (p2_total + 1e-3)
+
+    # -------------------------------------------------------
+    # TIMELINE FEATURES
+    # -------------------------------------------------------
     f.update(summarize_timeline(b))
 
-    # Derived features:
-    # Balanced damage: who has received more damage per turn
-    # Average HP ratio: which player maintains more HP
-    # Leadership volatility: how many times the lead changes
-    # Status difference: how many status conditions each player had
 
-    f['damage_balance'] = f['p2_damage_per_turn'] - f['p1_damage_per_turn']  # ojo: “daño recibido”, invertir si prefieres
-    f['hp_ratio'] = (f['p1_avg_hp_pct']+1e-3) / (f['p2_avg_hp_pct']+1e-3)
+    f['momentum_strength'] = abs(f['hp_diff_trend']) / (1.0 + f['lead_changes'])
+    f['comeback_flag'] = float(
+        (f['hp_diff_mean'] < 0.0) and (f['hp_diff_trend'] > 0.0)
+    )
+
+    # -------------------------------------------------------
+    # DERIVED FEATURES
+    # -------------------------------------------------------
+
+    # Balanced damage
+    f['damage_balance'] = f['p2_damage_per_turn'] - f['p1_damage_per_turn']
+
+    # HP ratio
+    f['hp_ratio'] = (
+        f['p1_avg_hp_pct'] + 1e-3
+    ) / (
+        f['p2_avg_hp_pct'] + 1e-3
+    )
+
+    # Lead volatility
     f['lead_volatility'] = f['lead_changes'] / max(1.0, f['n_turns'])
-    f['status_diff'] = (f['p1_status_count'] - f['p2_status_count'])
 
-    # Combine variables to capture complex interactions:
-    # type_adv_x_total: combines type and stat advantage
-    # stall_diff: who used more healing moves
-    # *_adv: advantages for each status type (paralysis, sleep, freeze, etc.)
-    # ko_adv: if the opponent has knocked out more Pokémon
+    # Status difference
+    f['status_diff'] = f['p1_status_count'] - f['p2_status_count']
 
+    # Interactions
     f['type_adv_x_total'] = f['type_advantage'] * f['total_stat_advantage']
     f['status_x_turns'] = f['status_diff'] / max(1.0, f['n_turns'])
     f['stall_diff'] = f['p1_stall_moves'] - f['p2_stall_moves']
-    f['freeze_adv'] = f['p1_frz_turns'] - f['p2_frz_turns']
-    f['sleep_adv']  = f['p1_slp_turns'] - f['p2_slp_turns']
-    f['para_adv']   = f['p1_par_turns'] - f['p2_par_turns']
-    f['ko_adv']     = f['p2_ko_count'] - f['p1_ko_count']  # si P2 tiene más KOs, P1 en peor situación
 
-    # Add the battle_id (battle number)
+    # Individual status advantages
+    f['freeze_adv'] = f['p1_frz_turns'] - f['p2_frz_turns']
+    f['sleep_adv'] = f['p1_slp_turns'] - f['p2_slp_turns']
+    f['para_adv'] = f['p1_par_turns'] - f['p2_par_turns']
+    f['ko_adv'] = f['p2_ko_count'] - f['p1_ko_count']  # si P2 tiene más KO, P1 en peor situación
+    f['type_adv_x_hp_ratio'] = f['type_advantage'] * f['hp_ratio']
+    f['type_disadv_x_para'] = f['type_disadvantage'] * f['para_adv']
+
+
+            
     f['battle_id'] = b.get('battle_id', -1)
-    # Add the label (player_won: 1 if the player won, 0 if lost)
+
     if 'player_won' in b:
         f['player_won'] = int(b['player_won'])
-    # Return the final dictionary with all features
+
     return f
+def create_features_from_battle(b, type_eff):
+    '''
+    Extracts and combines all relevant features from a Pokémon battle.
+    Calculates player team statistics, opponent lead data, type advantages, attribute differences,
+    and a summary of the battle (damage, turns, status conditions, control).
+    Returns a dictionary with all these variables ready to train the victory prediction model.
+    '''
+
+    # Dictionary where all features are stored
+    f = {}
+
+    # List with all Pokémon of player 1
+    p1_team = b.get('p1_team_details') or []
+
+    # Details of the opponent's lead Pokémon
+    p2_lead = b.get('p2_lead_details') or {}
+
+    # Add static features of player 1's team
+    f.update(team_static_features(p1_team, 'p1'))
+
+    # Extract the base stats of player 2's lead Pokémon 
+    for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']:
+        f[f'p2_lead_{s}'] = float(p2_lead.get(s, 0.0)) if p2_lead else 0.0
+
+    # Lead type
+    p2_types = safe_types(p2_lead.get('types', [])) if p2_lead else ['notype']
+
+    # Player 1 full type list
+    p1_types = [
+        t for p in p1_team for t in safe_types(p.get('types', []))
+        if t != 'notype'
+    ]
+
+    # -------------------------------------------------------
+    # TYPE EFFECTIVENESS FEATURES
+    # -------------------------------------------------------
+    if p1_types and p2_types:
+
+        # Effectiveness of P1 → P2
+        vals = [type_eff[t1][t2] for t1 in p1_types for t2 in p2_types]
+
+        # Effectiveness of P2 → P1
+        rvs = [type_eff[t2][t1] for t1 in p1_types for t2 in p2_types]
+
+        f['type_eff_mean'] = float(np.mean(vals))
+        f['type_eff_max'] = float(np.max(vals))
+        f['type_eff_min'] = float(np.min(vals))
+        f['type_advantage'] = f['type_eff_mean'] - 1.0
+        f['type_disadvantage'] = float(np.mean(rvs)) - 1.0
+
+    else:
+        f['type_eff_mean'] = 1.0
+        f['type_eff_max'] = 1.0
+        f['type_eff_min'] = 1.0
+        f['type_advantage'] = 0.0
+        f['type_disadvantage'] = 0.0
+
+
+    for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']:
+        f[f'diff_{s}'] = f.get(f'p1_{s}_mean', 0.0) - f.get(f'p2_lead_{s}', 0.0)
+
+    f['total_stat_advantage'] = (
+        sum(f.get(f'p1_{s}_mean', 0.0)
+            for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe'])
+        -
+        sum(f.get(f'p2_lead_{s}', 0.0)
+            for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe'])
+    )
+
+    for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']:
+        f[f'ratio_{s}'] = (
+            f.get(f'p1_{s}_mean', 0.0) + 1e-3
+        ) / (
+            f.get(f'p2_lead_{s}', 0.0) + 1e-3
+        )
+
+    # Ratio of total stats
+    p1_total = sum(
+        f.get(f'p1_{s}_mean', 0.0)
+        for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']
+    )
+    p2_total = sum(
+        f.get(f'p2_lead_{s}', 0.0)
+        for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']
+    )
+    f['ratio_total_stats'] = (p1_total + 1e-3) / (p2_total + 1e-3)
+
+    # -------------------------------------------------------
+    # TIMELINE FEATURES
+    # -------------------------------------------------------
+    f.update(summarize_timeline(b))
+
+
+    f['momentum_strength'] = abs(f['hp_diff_trend']) / (1.0 + f['lead_changes'])
+    f['comeback_flag'] = float(
+        (f['hp_diff_mean'] < 0.0) and (f['hp_diff_trend'] > 0.0)
+    )
+
+    # -------------------------------------------------------
+    # DERIVED FEATURES
+    # -------------------------------------------------------
+
+    # Balanced damage
+    f['damage_balance'] = f['p2_damage_per_turn'] - f['p1_damage_per_turn']
+
+    # HP ratio
+    f['hp_ratio'] = (
+        f['p1_avg_hp_pct'] + 1e-3
+    ) / (
+        f['p2_avg_hp_pct'] + 1e-3
+    )
+
+    # Lead volatility
+    f['lead_volatility'] = f['lead_changes'] / max(1.0, f['n_turns'])
+
+    # Status difference
+    f['status_diff'] = f['p1_status_count'] - f['p2_status_count']
+
+    # Interactions
+    f['type_adv_x_total'] = f['type_advantage'] * f['total_stat_advantage']
+    f['status_x_turns'] = f['status_diff'] / max(1.0, f['n_turns'])
+    f['stall_diff'] = f['p1_stall_moves'] - f['p2_stall_moves']
+
+    # Individual status advantages
+    f['freeze_adv'] = f['p1_frz_turns'] - f['p2_frz_turns']
+    f['sleep_adv'] = f['p1_slp_turns'] - f['p2_slp_turns']
+    f['para_adv'] = f['p1_par_turns'] - f['p2_par_turns']
+    f['ko_adv'] = f['p2_ko_count'] - f['p1_ko_count']  # si P2 tiene más KO, P1 en peor situación
+    f['type_adv_x_hp_ratio'] = f['type_advantage'] * f['hp_ratio']
+    f['type_disadv_x_para'] = f['type_disadvantage'] * f['para_adv']
+
+
+            
+    f['battle_id'] = b.get('battle_id', -1)
+
+    if 'player_won' in b:
+        f['player_won'] = int(b['player_won'])
+
+    return f
+def create_features_from_battle(b, type_eff):
+    '''
+    This function takes all the important details 
+    from a Pokémon battle and puts them together. It figures out things 
+    like the player’s team stats, the opponent’s lead info, type advantages,
+    differences in attributes, and a quick summary of the battle (damage, number
+    of turns, status effects, and control). In the end, it gives back a dictionary
+    with everything ready to train a model that predicts who will win
+
+    '''
+
+    f = {}
+
+    # List of all the Pokémonon on player's 1 team
+    p1_team = b.get('p1_team_details') or []
+
+    # Get the details of the opponent's lead Pokémon
+    p2_lead = b.get('p2_lead_details') or {}
+
+    # Add static features of player 1's team
+    f.update(team_static_features(p1_team, 'p1'))
+
+    # Get the base stats of the opponent's lead Pokemon (HP, attack,...)
+    for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']:
+        f[f'p2_lead_{s}'] = float(p2_lead.get(s, 0.0)) if p2_lead else 0.0
+
+    # Get the types of the opponent's lead Pokémon
+    p2_types = safe_types(p2_lead.get('types', [])) if p2_lead else ['notype']
+
+    # Full list of all types from player 1's team
+    p1_types = [
+        t for p in p1_team for t in safe_types(p.get('types', []))
+        if t != 'notype'
+    ]
+
+  
+    if p1_types and p2_types:
+
+        # Calculate how effective Player 1's types are against Player 2's types
+        vals = [type_eff[t1][t2] for t1 in p1_types for t2 in p2_types]
+
+        # Calculate how effective Player 2's types are against Player 1's types
+        rvs = [type_eff[t2][t1] for t1 in p1_types for t2 in p2_types]
+
+        #We store mean, max and min effectiveness values
+        f['type_eff_mean'] = float(np.mean(vals))
+        f['type_eff_max'] = float(np.max(vals))
+        f['type_eff_min'] = float(np.min(vals))
+
+        #Advantage and disadvantage based on type effectiveness
+        f['type_advantage'] = f['type_eff_mean'] - 1.0
+        f['type_disadvantage'] = float(np.mean(rvs)) - 1.0
+
+    #If there are no types available, use neutral values
+    else:
+        f['type_eff_mean'] = 1.0
+        f['type_eff_max'] = 1.0
+        f['type_eff_min'] = 1.0
+        f['type_advantage'] = 0.0
+        f['type_disadvantage'] = 0.0
+
+
+    #Difference between Player 1's average stats and Player 2's lead stats
+    for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']:
+        f[f'diff_{s}'] = f.get(f'p1_{s}mean', 0.0) - f.get(f'p2_lead{s}', 0.0)
+
+    #Total stat advantage
+    f['total_stat_advantage'] = (
+        sum(f.get(f'p1_{s}_mean', 0.0)
+            for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe'])
+        -
+        sum(f.get(f'p2_lead_{s}', 0.0)
+            for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe'])
+    )
+
+    #Ratio of each stat between Player 1 and Player 2. It means how many times Player 1's stat is bigger compared to Player 2's stat.
+    #If ratio > 1 Player 1 has the advantage and if ratio < 1, Player 2 has the advantage
+    for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']:
+        f[f'ratio_{s}'] = (
+            f.get(f'p1_{s}_mean', 0.0) + 1e-3 #we add a small value to avoid the division by zero
+        ) / (
+            f.get(f'p2_lead_{s}', 0.0) + 1e-3
+        )
+
+    # Ratio of total stats (overall strength comparision between both teams)
+    p1_total = sum(
+        f.get(f'p1_{s}_mean', 0.0)
+        for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']
+    )
+    p2_total = sum(
+        f.get(f'p2_lead_{s}', 0.0)
+        for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']
+    )
+    f['ratio_total_stats'] = (p1_total + 1e-3) / (p2_total + 1e-3)
+
+
+    #We add features that summarize the battle timeline such us lead changes, damage trends...
+    f.update(summarize_timeline(b))
+
+    #Momentum strength measures how strong the HP trend is compared to the number of lead changes
+    #so a high value means one player is dominating without many switches
+    f['momentum_strength'] = abs(f['hp_diff_trend']) / (1.0 + f['lead_changes'])
+
+    #Comeback flag: is true when Player 1 was behind in HP but now is catching up
+    f['comeback_flag'] = float(
+        (f['hp_diff_mean'] < 0.0) and (f['hp_diff_trend'] > 0.0)
+    )
+
+
+    #These are derived features, extra info calculated from the battle to help the prediction model
+    # Difference between opponent's and player's damage per turn
+    f['damage_balance'] = f['p2_damage_per_turn'] - f['p1_damage_per_turn']
+
+    # Ratio of average HP percentages
+    f['hp_ratio'] = (
+        f['p1_avg_hp_pct'] + 1e-3
+    ) / (
+        f['p2_avg_hp_pct'] + 1e-3
+    )
+
+    # How often the lead Pokémon changed compared to total turns
+    f['lead_volatility'] = f['lead_changes'] / max(1.0, f['n_turns'])
+
+    #Calculate the difference in the number of status conditions between player 1 and player 2 
+    f['status_diff'] = f['p1_status_count'] - f['p2_status_count']
+
+    # Combine type advantage and total stat advantage into one feature
+    f['type_adv_x_total'] = f['type_advantage'] * f['total_stat_advantage']
+    # # Combine status difference with number of turns (normalized)
+    f['status_x_turns'] = f['status_diff'] / max(1.0, f['n_turns'])
+
+    #Number of stall moves used by player 2 (moves that delay the battle)
+    f['stall_diff'] = f['p1_stall_moves'] - f['p2_stall_moves']
+
+    # Individual status advantages (how many turns each player had these conditions)
+    f['freeze_adv'] = f['p1_frz_turns'] - f['p2_frz_turns']
+    f['sleep_adv'] = f['p1_slp_turns'] - f['p2_slp_turns']
+    f['para_adv'] = f['p1_par_turns'] - f['p2_par_turns']
+    f['ko_adv'] = f['p2_ko_count'] - f['p1_ko_count']  # if P2 has more KO, P1 is in worse position
+    f['type_adv_x_hp_ratio'] = f['type_advantage'] * f['hp_ratio']
+    f['type_disadv_x_para'] = f['type_disadvantage'] * f['para_adv']
+
+
+    #Add battle ID and result if available    
+    f['battle_id'] = b.get('battle_id', -1)
+
+    if 'player_won' in b:
+        f['player_won'] = int(b['player_won'])
+
+    return f
+
+def create_features_from_battle(b, type_eff):
+    '''
+    This function takes all the important details 
+    from a Pokémon battle and puts them together. It figures out things 
+    like the player’s team stats, the opponent’s lead info, type advantages,
+    differences in attributes, and a quick summary of the battle (damage, number
+    of turns, status effects, and control). In the end, it gives back a dictionary
+    with everything ready to train a model that predicts who will win
+
+    '''
+
+    f = {}
+
+    # List of all the Pokémonon on player's 1 team
+    p1_team = b.get('p1_team_details') or []
+
+    # Get the details of the opponent's lead Pokémon
+    p2_lead = b.get('p2_lead_details') or {}
+
+    # Add static features of player 1's team
+    f.update(team_static_features(p1_team, 'p1'))
+
+    # Get the base stats of the opponent's lead Pokemon (HP, attack,...)
+    for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']:
+        f[f'p2_lead_{s}'] = float(p2_lead.get(s, 0.0)) if p2_lead else 0.0
+
+    # Get the types of the opponent's lead Pokémon
+    p2_types = safe_types(p2_lead.get('types', [])) if p2_lead else ['notype']
+
+    # Full list of all types from player 1's team
+    p1_types = [
+        t for p in p1_team for t in safe_types(p.get('types', []))
+        if t != 'notype'
+    ]
+
+  
+    if p1_types and p2_types:
+
+        # Calculate how effective Player 1's types are against Player 2's types
+        vals = [type_eff[t1][t2] for t1 in p1_types for t2 in p2_types]
+
+        # Calculate how effective Player 2's types are against Player 1's types
+        rvs = [type_eff[t2][t1] for t1 in p1_types for t2 in p2_types]
+
+        #We store mean, max and min effectiveness values
+        f['type_eff_mean'] = float(np.mean(vals))
+        f['type_eff_max'] = float(np.max(vals))
+        f['type_eff_min'] = float(np.min(vals))
+
+        #Advantage and disadvantage based on type effectiveness
+        f['type_advantage'] = f['type_eff_mean'] - 1.0
+        f['type_disadvantage'] = float(np.mean(rvs)) - 1.0
+
+    #If there are no types available, use neutral values
+    else:
+        f['type_eff_mean'] = 1.0
+        f['type_eff_max'] = 1.0
+        f['type_eff_min'] = 1.0
+        f['type_advantage'] = 0.0
+        f['type_disadvantage'] = 0.0
+
+
+    #Difference between Player 1's average stats and Player 2's lead stats
+    for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']:
+        f[f'diff_{s}'] = f.get(f'p1_{s}mean', 0.0) - f.get(f'p2_lead{s}', 0.0)
+
+    #Total stat advantage
+    f['total_stat_advantage'] = (
+        sum(f.get(f'p1_{s}_mean', 0.0)
+            for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe'])
+        -
+        sum(f.get(f'p2_lead_{s}', 0.0)
+            for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe'])
+    )
+
+    #Ratio of each stat between Player 1 and Player 2. It means how many times Player 1's stat is bigger compared to Player 2's stat.
+    #If ratio > 1 Player 1 has the advantage and if ratio < 1, Player 2 has the advantage
+    for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']:
+        f[f'ratio_{s}'] = (
+            f.get(f'p1_{s}_mean', 0.0) + 1e-3 #we add a small value to avoid the division by zero
+        ) / (
+            f.get(f'p2_lead_{s}', 0.0) + 1e-3
+        )
+
+    # Ratio of total stats (overall strength comparision between both teams)
+    p1_total = sum(
+        f.get(f'p1_{s}_mean', 0.0)
+        for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']
+    )
+    p2_total = sum(
+        f.get(f'p2_lead_{s}', 0.0)
+        for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']
+    )
+    f['ratio_total_stats'] = (p1_total + 1e-3) / (p2_total + 1e-3)
+
+
+    #We add features that summarize the battle timeline such us lead changes, damage trends...
+    f.update(summarize_timeline(b))
+
+    #Momentum strength measures how strong the HP trend is compared to the number of lead changes
+    #so a high value means one player is dominating without many switches
+    f['momentum_strength'] = abs(f['hp_diff_trend']) / (1.0 + f['lead_changes'])
+
+    #Comeback flag: is true when Player 1 was behind in HP but now is catching up
+    f['comeback_flag'] = float(
+        (f['hp_diff_mean'] < 0.0) and (f['hp_diff_trend'] > 0.0)
+    )
+
+
+    #These are derived features, extra info calculated from the battle to help the prediction model
+    # Difference between opponent's and player's damage per turn
+    f['damage_balance'] = f['p2_damage_per_turn'] - f['p1_damage_per_turn']
+
+    # Ratio of average HP percentages
+    f['hp_ratio'] = (
+        f['p1_avg_hp_pct'] + 1e-3
+    ) / (
+        f['p2_avg_hp_pct'] + 1e-3
+    )
+
+    # How often the lead Pokémon changed compared to total turns
+    f['lead_volatility'] = f['lead_changes'] / max(1.0, f['n_turns'])
+
+    #Calculate the difference in the number of status conditions between player 1 and player 2 
+    f['status_diff'] = f['p1_status_count'] - f['p2_status_count']
+
+    # Combine type advantage and total stat advantage into one feature
+    f['type_adv_x_total'] = f['type_advantage'] * f['total_stat_advantage']
+    # # Combine status difference with number of turns (normalized)
+    f['status_x_turns'] = f['status_diff'] / max(1.0, f['n_turns'])
+
+    #Number of stall moves used by player 2 (moves that delay the battle)
+    f['stall_diff'] = f['p1_stall_moves'] - f['p2_stall_moves']
+
+    # Individual status advantages (how many turns each player had these conditions)
+    f['freeze_adv'] = f['p1_frz_turns'] - f['p2_frz_turns']
+    f['sleep_adv'] = f['p1_slp_turns'] - f['p2_slp_turns']
+    f['para_adv'] = f['p1_par_turns'] - f['p2_par_turns']
+    f['ko_adv'] = f['p2_ko_count'] - f['p1_ko_count']  # if P2 has more KO, P1 is in worse position
+    f['type_adv_x_hp_ratio'] = f['type_advantage'] * f['hp_ratio']
+    f['type_disadv_x_para'] = f['type_disadvantage'] * f['para_adv']
+
+
+    #Add battle ID and result if available    
+    f['battle_id'] = b.get('battle_id', -1)
+
+    if 'player_won' in b:
+        f['player_won'] = int(b['player_won'])
+
+    return f
+
+def create_features_from_battle(b, type_eff):
+    '''
+    This function takes all the important details 
+    from a Pokémon battle and puts them together. It figures out things 
+    like the player’s team stats, the opponent’s lead info, type advantages,
+    differences in attributes, and a quick summary of the battle (damage, number
+    of turns, status effects, and control). In the end, it gives back a dictionary
+    with everything ready to train a model that predicts who will win
+
+    '''
+
+    f = {}
+
+    # List of all the Pokémonon on player's 1 team
+    p1_team = b.get('p1_team_details') or []
+
+    # Get the details of the opponent's lead Pokémon
+    p2_lead = b.get('p2_lead_details') or {}
+
+    # Add static features of player 1's team
+    f.update(team_static_features(p1_team, 'p1'))
+
+    # Get the base stats of the opponent's lead Pokemon (HP, attack,...)
+    for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']:
+        f[f'p2_lead_{s}'] = float(p2_lead.get(s, 0.0)) if p2_lead else 0.0
+
+    # Get the types of the opponent's lead Pokémon
+    p2_types = safe_types(p2_lead.get('types', [])) if p2_lead else ['notype']
+
+    # Full list of all types from player 1's team
+    p1_types = [
+        t for p in p1_team for t in safe_types(p.get('types', []))
+        if t != 'notype'
+    ]
+
+  
+    if p1_types and p2_types:
+
+        # Calculate how effective Player 1's types are against Player 2's types
+        vals = [type_eff[t1][t2] for t1 in p1_types for t2 in p2_types]
+
+        # Calculate how effective Player 2's types are against Player 1's types
+        rvs = [type_eff[t2][t1] for t1 in p1_types for t2 in p2_types]
+
+        #We store mean, max and min effectiveness values
+        f['type_eff_mean'] = float(np.mean(vals))
+        f['type_eff_max'] = float(np.max(vals))
+        f['type_eff_min'] = float(np.min(vals))
+
+        #Advantage and disadvantage based on type effectiveness
+        f['type_advantage'] = f['type_eff_mean'] - 1.0
+        f['type_disadvantage'] = float(np.mean(rvs)) - 1.0
+
+    #If there are no types available, use neutral values
+    else:
+        f['type_eff_mean'] = 1.0
+        f['type_eff_max'] = 1.0
+        f['type_eff_min'] = 1.0
+        f['type_advantage'] = 0.0
+        f['type_disadvantage'] = 0.0
+
+
+    #Difference between Player 1's average stats and Player 2's lead stats
+    for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']:
+        f[f'diff_{s}'] = f.get(f'p1_{s}mean', 0.0) - f.get(f'p2_lead{s}', 0.0)
+
+    #Total stat advantage
+    f['total_stat_advantage'] = (
+        sum(f.get(f'p1_{s}_mean', 0.0)
+            for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe'])
+        -
+        sum(f.get(f'p2_lead_{s}', 0.0)
+            for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe'])
+    )
+
+    #Ratio of each stat between Player 1 and Player 2. It means how many times Player 1's stat is bigger compared to Player 2's stat.
+    #If ratio > 1 Player 1 has the advantage and if ratio < 1, Player 2 has the advantage
+    for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']:
+        f[f'ratio_{s}'] = (
+            f.get(f'p1_{s}_mean', 0.0) + 1e-3 #we add a small value to avoid the division by zero
+        ) / (
+            f.get(f'p2_lead_{s}', 0.0) + 1e-3
+        )
+
+    # Ratio of total stats (overall strength comparision between both teams)
+    p1_total = sum(
+        f.get(f'p1_{s}_mean', 0.0)
+        for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']
+    )
+    p2_total = sum(
+        f.get(f'p2_lead_{s}', 0.0)
+        for s in ['base_hp', 'base_atk', 'base_def', 'base_spa', 'base_spd', 'base_spe']
+    )
+    f['ratio_total_stats'] = (p1_total + 1e-3) / (p2_total + 1e-3)
+
+
+    #We add features that summarize the battle timeline such us lead changes, damage trends...
+    f.update(summarize_timeline(b))
+
+    #Momentum strength measures how strong the HP trend is compared to the number of lead changes
+    #so a high value means one player is dominating without many switches
+    f['momentum_strength'] = abs(f['hp_diff_trend']) / (1.0 + f['lead_changes'])
+
+    #Comeback flag: is true when Player 1 was behind in HP but now is catching up
+    f['comeback_flag'] = float(
+        (f['hp_diff_mean'] < 0.0) and (f['hp_diff_trend'] > 0.0)
+    )
+
+
+    #These are derived features, extra info calculated from the battle to help the prediction model
+    # Difference between opponent's and player's damage per turn
+    f['damage_balance'] = f['p2_damage_per_turn'] - f['p1_damage_per_turn']
+
+    # Ratio of average HP percentages
+    f['hp_ratio'] = (
+        f['p1_avg_hp_pct'] + 1e-3
+    ) / (
+        f['p2_avg_hp_pct'] + 1e-3
+    )
+
+    # How often the lead Pokémon changed compared to total turns
+    f['lead_volatility'] = f['lead_changes'] / max(1.0, f['n_turns'])
+
+    #Calculate the difference in the number of status conditions between player 1 and player 2 
+    f['status_diff'] = f['p1_status_count'] - f['p2_status_count']
+
+    # Combine type advantage and total stat advantage into one feature
+    f['type_adv_x_total'] = f['type_advantage'] * f['total_stat_advantage']
+    # # Combine status difference with number of turns (normalized)
+    f['status_x_turns'] = f['status_diff'] / max(1.0, f['n_turns'])
+
+    #Number of stall moves used by player 2 (moves that delay the battle)
+    f['stall_diff'] = f['p1_stall_moves'] - f['p2_stall_moves']
+
+    # Individual status advantages (how many turns each player had these conditions)
+    f['freeze_adv'] = f['p1_frz_turns'] - f['p2_frz_turns']
+    f['sleep_adv'] = f['p1_slp_turns'] - f['p2_slp_turns']
+    f['para_adv'] = f['p1_par_turns'] - f['p2_par_turns']
+    f['ko_adv'] = f['p2_ko_count'] - f['p1_ko_count']  # if P2 has more KO, P1 is in worse position
+    f['type_adv_x_hp_ratio'] = f['type_advantage'] * f['hp_ratio']
+    f['type_disadv_x_para'] = f['type_disadvantage'] * f['para_adv']
+
+
+    #Add battle ID and result if available    
+    f['battle_id'] = b.get('battle_id', -1)
+
+    if 'player_won' in b:
+        f['player_won'] = int(b['player_won'])
+
+    return f
+
 
 def build_feature_df(raw_list, type_eff):
     '''
